@@ -2,12 +2,17 @@ const { Telegraf } = require('telegraf');
 const axios = require('axios');
 const fs = require('fs').promises;
 const path = require('path');
+const express = require('express');
 
 // Configuration
-const BOT_TOKEN = '8185097888:AAHArOl0JrInezQXXpE_EWz9WmN3qzMrErU';
-const API_ENDPOINT = 'https://ske1.onrender.com/create';
+const BOT_TOKEN = process.env.BOT_TOKEN || '8185097888:AAHArOl0JrInezQXXpE_EWz9WmN3qzMrErU';
+const API_ENDPOINT = process.env.API_ENDPOINT || 'https://ske1.onrender.com/create';
 const USERS_DB_PATH = path.join(__dirname, 'users.json');
-const OWNER_ID = '7494072378'; // Replace with your numeric user ID
+const OWNER_ID = process.env.OWNER_ID || '7494072378'; // Set in Render env variables
+const PORT = process.env.PORT || 3000;
+
+// Initialize express app for health checks
+const app = express();
 
 // Initialize bot
 const bot = new Telegraf(BOT_TOKEN);
@@ -59,6 +64,60 @@ async function recordUserKey(userId, userInfo, keyData) {
 async function getUserKey(userId) {
     return usersDatabase[userId] || null;
 }
+
+// Express routes for health checks and monitoring
+app.get('/', (req, res) => {
+    res.json({
+        status: 'alive',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        users: Object.keys(usersDatabase).length,
+        bot: 'running'
+    });
+});
+
+app.get('/ping', (req, res) => {
+    res.json({
+        status: 'pong',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        users: Object.keys(usersDatabase).length
+    });
+});
+
+app.get('/stats', async (req, res) => {
+    // Optional: Add authentication via query param?key=your_secret
+    const authKey = req.query.key;
+    if (authKey && authKey === process.env.ADMIN_KEY) {
+        const totalUsers = Object.keys(usersDatabase).length;
+        const activeKeys = Object.values(usersDatabase).filter(user => {
+            const expiryDate = new Date(user.expiresAt);
+            return expiryDate > new Date();
+        }).length;
+        
+        res.json({
+            totalUsers,
+            activeKeys,
+            expiredKeys: totalUsers - activeKeys,
+            keysFromChannels: Object.values(usersDatabase).filter(user => user.chatType === 'channel').length,
+            keysFromGroups: Object.values(usersDatabase).filter(user => user.chatType === 'group' || user.chatType === 'supergroup').length,
+            last24Hours: Object.values(usersDatabase).filter(user => {
+                const generated = new Date(user.generatedAt);
+                const dayAgo = new Date();
+                dayAgo.setDate(dayAgo.getDate() - 1);
+                return generated > dayAgo;
+            }).length
+        });
+    } else {
+        res.status(401).json({ error: 'Unauthorized' });
+    }
+});
+
+// Start express server
+app.listen(PORT, () => {
+    console.log(`🌐 Web server running on port ${PORT}`);
+    console.log(`✅ Health check available at: http://localhost:${PORT}/ping`);
+});
 
 // Middleware to log all messages
 bot.use((ctx, next) => {
@@ -112,13 +171,12 @@ bot.command('mykey', async (ctx) => {
     }
 });
 
-// Function to properly reply to a message (works for both channels and groups)
+// Function to properly reply to a message
 async function replyToMessage(ctx, message, parseMode = 'Markdown') {
     try {
         const chatId = ctx.chat.id;
         const messageId = ctx.message.message_id;
         
-        // Method 1: Using telegram API directly with reply_to_message_id
         await bot.telegram.sendMessage(chatId, message, {
             reply_to_message_id: messageId,
             parse_mode: parseMode
@@ -127,8 +185,6 @@ async function replyToMessage(ctx, message, parseMode = 'Markdown') {
         console.log(`✅ Replied to message ${messageId} in chat ${chatId}`);
     } catch (error) {
         console.error('Error replying to message:', error);
-        
-        // Fallback: Just send without reply
         try {
             await ctx.reply(message, { parse_mode: parseMode });
         } catch (fallbackError) {
@@ -144,7 +200,6 @@ bot.hears(/free key/i, async (ctx) => {
         const chatType = ctx.chat?.type;
         const messageId = ctx.message?.message_id;
         
-        // Get location for logging
         let location = '';
         if (chatType === 'channel') {
             location = 'Channel Comment';
@@ -156,7 +211,6 @@ bot.hears(/free key/i, async (ctx) => {
         
         console.log(`📍 Processing "free key" from ${location} (User: ${userId}, Message ID: ${messageId})`);
         
-        // Check if user already received a key
         const hasKey = await hasUserReceivedKey(userId);
         
         if (hasKey) {
@@ -174,17 +228,13 @@ bot.hears(/free key/i, async (ctx) => {
             return;
         }
         
-        // Get user information
         const user = ctx.from;
-        
-        // Generate key based on Telegram User ID
         const uniqueUserId = user.id;
         const userIdentifier = `user_${uniqueUserId}`;
         const keyName = `MelnoityTrial-${userIdentifier}`;
         
         console.log(`🔑 Generating key: ${keyName}`);
         
-        // Send POST request to create key
         const response = await axios.post(API_ENDPOINT, {
             key: keyName,
             duration: '1d'
@@ -198,7 +248,6 @@ bot.hears(/free key/i, async (ctx) => {
         if (response.data.status === 'success') {
             const keyData = response.data;
             
-            // Record that user received a key
             await recordUserKey(userId, {
                 username: user.username,
                 first_name: user.first_name,
@@ -208,7 +257,6 @@ bot.hears(/free key/i, async (ctx) => {
                 messageId: messageId
             }, keyData);
             
-            // Format the response message
             const message = 
                 '✅ *Key Created Successfully!*\n\n' +
                 `🔑 *Key:* \`${keyData.key}\`\n` +
@@ -225,11 +273,9 @@ bot.hears(/free key/i, async (ctx) => {
                 '💳 *Purchase permanent keys:*\n' +
                 '🔗 https://melonity-ios.vercel.app/#prices';
             
-            // Send the reply directly to user's message (THIS IS THE KEY FIX)
             await replyToMessage(ctx, message);
-            console.log(`✅ Key sent and replied to user ${user.first_name} (${userId}) in ${location}`);
+            console.log(`✅ Key sent to user ${user.first_name} (${userId})`);
             
-            // Notify owner
             if (OWNER_ID && OWNER_ID !== 'YOUR_TELEGRAM_USER_ID') {
                 try {
                     const totalKeys = Object.keys(usersDatabase).length;
@@ -245,9 +291,7 @@ bot.hears(/free key/i, async (ctx) => {
                         `@${user.username || 'no username'}\n` +
                         `🔑 *Key:* \`${keyData.key}\`\n` +
                         `📅 *Expires:* ${keyData.expiresAt}\n` +
-                        `📍 *Location:* ${location}\n` +
-                        `💬 *Chat ID:* ${ctx.chat?.id || 'N/A'}\n` +
-                        `📝 *Message ID:* ${messageId}\n\n` +
+                        `📍 *Location:* ${location}\n\n` +
                         `📊 *Total Keys Issued:* ${totalKeys}\n` +
                         `✅ *Active Keys:* ${activeKeys}`,
                         { parse_mode: 'Markdown' }
@@ -274,7 +318,7 @@ bot.hears(/free key/i, async (ctx) => {
                     errorMessage += '⚠️ A key for this account already exists in the system.\n\n' +
                                    'This might be a duplicate request. Please use `/mykey` to check your existing key.';
                 } else {
-                    errorMessage += error.response.data.message || 'Invalid request. Please check your key format.';
+                    errorMessage += error.response.data.message || 'Invalid request.';
                 }
             } else if (error.response.status === 500) {
                 errorMessage += 'Server error. Please try again later.';
@@ -291,15 +335,15 @@ bot.hears(/free key/i, async (ctx) => {
     }
 });
 
-// Admin command to check database stats
+// Admin commands
 bot.command('keystats', async (ctx) => {
     if (!OWNER_ID || OWNER_ID === 'YOUR_TELEGRAM_USER_ID') {
-        await ctx.reply('⚠️ Owner ID not configured. Please set OWNER_ID in the code.');
+        await ctx.reply('⚠️ Owner ID not configured.');
         return;
     }
     
     if (ctx.from.id.toString() !== OWNER_ID.toString()) {
-        await ctx.reply('⛔ You are not authorized to use this command.');
+        await ctx.reply('⛔ You are not authorized.');
         return;
     }
     
@@ -308,66 +352,50 @@ bot.command('keystats', async (ctx) => {
         const expiryDate = new Date(user.expiresAt);
         return expiryDate > new Date();
     }).length;
-    const keysFromChannels = Object.values(usersDatabase).filter(user => user.chatType === 'channel').length;
-    const keysFromGroups = Object.values(usersDatabase).filter(user => user.chatType === 'group' || user.chatType === 'supergroup').length;
     
     await ctx.replyWithMarkdown(
         '📊 *Key Database Statistics*\n\n' +
         `👥 *Total Users:* ${totalUsers}\n` +
         `✅ *Active Keys:* ${activeKeys}\n` +
-        `⏰ *Expired Keys:* ${totalUsers - activeKeys}\n` +
-        `📝 *From Channel Comments:* ${keysFromChannels}\n` +
-        `👥 *From Groups:* ${keysFromGroups}\n\n` +
-        `💾 *Database Path:* \`${USERS_DB_PATH}\``
+        `⏰ *Expired Keys:* ${totalUsers - activeKeys}`
     );
 });
 
-// Admin command to check specific user
 bot.command('checkuser', async (ctx) => {
     if (!OWNER_ID || OWNER_ID === 'YOUR_TELEGRAM_USER_ID') {
-        await ctx.reply('⚠️ Owner ID not configured. Please set OWNER_ID in the code.');
+        await ctx.reply('⚠️ Owner ID not configured.');
         return;
     }
     
     if (ctx.from.id.toString() !== OWNER_ID.toString()) {
-        await ctx.reply('⛔ You are not authorized to use this command.');
+        await ctx.reply('⛔ You are not authorized.');
         return;
     }
     
     const args = ctx.message.text.split(' ');
     if (args.length < 2) {
-        await ctx.reply('Usage: /checkuser <user_id_or_username>');
+        await ctx.reply('Usage: /checkuser <user_id>');
         return;
     }
     
     const target = args[1];
-    let userData = null;
-    
-    if (!isNaN(target)) {
-        userData = usersDatabase[target];
-    } else {
-        const username = target.replace('@', '');
-        userData = Object.values(usersDatabase).find(user => user.username === username);
-    }
+    const userData = usersDatabase[target];
     
     if (userData) {
         await ctx.replyWithMarkdown(
             `🔍 *User Information*\n\n` +
             `🆔 *User ID:* ${userData.userId}\n` +
             `👤 *Name:* ${userData.firstName} ${userData.lastName || ''}\n` +
-            `@${userData.username || 'no username'}\n` +
             `🔑 *Key:* \`${userData.key}\`\n` +
-            `📅 *Generated:* ${new Date(userData.generatedAt).toLocaleString()}\n` +
             `📅 *Expires:* ${userData.expiresAt}\n` +
-            `📍 *Source:* ${userData.chatType || 'unknown'}\n` +
             `✅ *Status:* ${new Date(userData.expiresAt) > new Date() ? '🟢 Active' : '🔴 Expired'}`
         );
     } else {
-        await ctx.reply(`❌ User not found in database.`);
+        await ctx.reply(`❌ User not found.`);
     }
 });
 
-// Error handling middleware
+// Error handling
 bot.catch((err, ctx) => {
     console.error(`Error for ${ctx.updateType}:`, err);
     const errorMessage = '❌ An unexpected error occurred. Please try again later.';
@@ -378,53 +406,40 @@ bot.catch((err, ctx) => {
                 reply_to_message_id: ctx.message.message_id,
                 parse_mode: 'Markdown'
             }).catch(console.error);
-        } else {
-            ctx.reply(errorMessage).catch(console.error);
         }
     } catch (e) {
         console.error('Could not send error message:', e);
     }
 });
 
-// Initialize database and start bot
+// Initialize and start
 async function init() {
     await loadUsersDatabase();
     
-    if (!OWNER_ID || OWNER_ID === 'YOUR_TELEGRAM_USER_ID') {
-        console.log('⚠️ WARNING: OWNER_ID not configured!');
-        console.log('💡 To receive notifications, set your numeric Telegram User ID as OWNER_ID');
-        console.log('🔍 How to get your ID: Message @userinfobot on Telegram');
-    } else {
-        console.log(`👑 Owner notifications will be sent to user ID: ${OWNER_ID}`);
-    }
+    // Set webhook or polling (Render works better with polling)
+    await bot.launch();
     
-    bot.launch()
-        .then(() => {
-            console.log('🤖 Bot is running...');
-            console.log(`📡 Using API endpoint: ${API_ENDPOINT}`);
-            console.log(`💾 Users database: ${USERS_DB_PATH}`);
-            console.log(`📊 Loaded ${Object.keys(usersDatabase).length} existing users`);
-            console.log('✅ Bot will NOW reply directly to user messages in both groups AND channel comments!');
-            console.log('🛡️ Anti-abuse system ENABLED - One key per Telegram account');
-        })
-        .catch((err) => {
-            console.error('Failed to start bot:', err);
-            process.exit(1);
-        });
+    console.log('🤖 Bot is running...');
+    console.log(`📡 Using API endpoint: ${API_ENDPOINT}`);
+    console.log(`💾 Users database: ${USERS_DB_PATH}`);
+    console.log(`📊 Loaded ${Object.keys(usersDatabase).length} existing users`);
+    console.log('✅ Bot is ready!');
 }
 
 init();
 
-// Enable graceful stop
+// Graceful stop
 process.once('SIGINT', () => {
     saveUsersDatabase().then(() => {
-        console.log('💾 Saved users database before exit');
+        console.log('💾 Saved database before exit');
         bot.stop('SIGINT');
+        process.exit(0);
     });
 });
 process.once('SIGTERM', () => {
     saveUsersDatabase().then(() => {
-        console.log('💾 Saved users database before exit');
+        console.log('💾 Saved database before exit');
         bot.stop('SIGTERM');
+        process.exit(0);
     });
 });
