@@ -6,7 +6,7 @@ const express = require('express');
 
 // Configuration
 const BOT_TOKEN = process.env.BOT_TOKEN || '8185097888:AAHArOl0JrInezQXXpE_EWz9WmN3qzMrErU';
-const API_ENDPOINT = process.env.API_ENDPOINT || 'https://ske1.onrender.com/create';
+const API_ENDPOINT = process.env.API_ENDPOINT || 'https://ske2.onrender.com/create';
 const USERS_DB_PATH = path.join(__dirname, 'users.json');
 const OWNER_ID = process.env.OWNER_ID || '7494072378'; // Set in Render env variables
 const PORT = process.env.PORT || 3000;
